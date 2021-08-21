@@ -78,17 +78,62 @@ fn hash_to_g1(input: &[u8]) -> G1Projective {
     <G1Projective as HashToCurve<ExpandMsgXmd<Blake2b>>>::hash_to_curve(input, DST)
 }
 
-fn create_generators(pk: &G2Affine, h: &G2Affine) -> (G1Projective, G1Projective) {
-    let mut buf = [0u8; G2_UNCOMPRESSED_SIZE * 2 + 2 + 4];
-    buf[..G2_UNCOMPRESSED_SIZE].copy_from_slice(&pk.to_uncompressed()[..]);
-    buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
-        .copy_from_slice(&pk.to_uncompressed());
-    buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
-        .copy_from_slice(&h.to_uncompressed());
-    let h0 = hash_to_g1(&buf);
-    buf[G2_UNCOMPRESSED_SIZE * 2 + 2..].copy_from_slice(&1u32.to_be_bytes());
-    let h1 = hash_to_g1(&buf);
-    (h0, h1)
+pub struct Generators {
+    pk: G2Affine,
+    h: G2Affine,
+    h0: G1Projective,
+    h1: G1Projective,
+}
+
+impl Generators {
+    pub fn new(pk: &G2Affine, h: &G2Affine) -> Self {
+        let mut buf = [0u8; G2_UNCOMPRESSED_SIZE * 2 + 2 + 4];
+        buf[..G2_UNCOMPRESSED_SIZE].copy_from_slice(&pk.to_uncompressed()[..]);
+        buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
+            .copy_from_slice(&pk.to_uncompressed());
+        buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
+            .copy_from_slice(&h.to_uncompressed());
+        let h0 = hash_to_g1(&buf);
+        buf[G2_UNCOMPRESSED_SIZE * 2 + 2..].copy_from_slice(&1u32.to_be_bytes());
+        let h1 = hash_to_g1(&buf);
+        Self {
+            pk: *pk,
+            h: *h,
+            h0,
+            h1,
+        }
+    }
+}
+
+pub struct Signature {
+    a: G1Affine,
+    e: Scalar,
+}
+
+impl Signature {
+    pub fn new(
+        sk: &Scalar,
+        gens: &Generators,
+        q: Scalar,
+        timestamp: u64,
+        accum: &G1Affine,
+    ) -> Self {
+        // TODO - make deterministic
+        let e = Scalar::random(OsRng);
+        // TODO - sum-of-products
+        let b = gens.h0 * q + gens.h1 * Scalar::from(timestamp) + accum;
+        let a = (b * (sk + e).invert().unwrap()).to_affine();
+        Self { a, e }
+    }
+
+    pub fn verify(&self, gens: &Generators, q: Scalar, timestamp: u64, accum: &G1Affine) -> bool {
+        // TODO - sum-of-products
+        let b = gens.h0 * q + gens.h1 * Scalar::from(timestamp) + accum;
+        pairing(
+            &self.a,
+            &(G2Projective::generator() * self.e + gens.pk).to_affine(),
+        ) == pairing(&b.to_affine(), &G2Affine::generator())
+    }
 }
 
 pub struct Token {
@@ -97,32 +142,24 @@ pub struct Token {
     timestamp: u64,
     accum: G1Affine,
     witness: G1Affine,
-    sig: G1Affine,
-    e: Scalar,
+    sig: Signature,
 }
 
 impl Token {
     pub fn new(
-        sk: &Scalar,
-        pk: &G2Affine,
-        h: &G2Affine,
-        q: Scalar,
+        gens: &Generators,
         timestamp: u64,
         accum: &G1Affine,
         witness: &G1Affine,
+        sig: Signature,
     ) -> Self {
-        let (h0, h1) = create_generators(pk, h);
-        let e = Scalar::random(OsRng); // will be deterministic
-        let b = h0 * q + h1 * Scalar::from(timestamp) + accum;
-        let sig = (b * (sk + e).invert().unwrap()).to_affine();
         Self {
-            pk: *pk,
-            h: *h,
+            pk: gens.pk,
+            h: gens.h,
             timestamp,
             accum: *accum,
             witness: *witness,
             sig,
-            e,
         }
     }
 
@@ -139,12 +176,8 @@ impl Token {
     }
 
     pub fn verify(&self, q: Scalar, member: Scalar) -> bool {
-        let (h0, h1) = create_generators(&self.pk, &self.h);
-        let b = h0 * q + h1 * Scalar::from(self.timestamp) + self.accum;
-        pairing(
-            &self.sig,
-            &(G2Projective::generator() * self.e + self.pk).to_affine(),
-        ) == pairing(&b.to_affine(), &G2Affine::generator())
+        let gens = Generators::new(&self.pk, &self.h);
+        self.sig.verify(&gens, q, self.timestamp, &self.accum)
             && check_witness(member, &self.witness, &self.accum, &self.h)
     }
 }
@@ -202,9 +235,15 @@ fn main() {
     let block = 10001;
     let timestamp = 9992595252;
     let q = Token::create_q(reg_id, block);
-    let token = Token::new(&sk, &pk, &h, q, timestamp, &acc1, &wit);
+    let gens = Generators::new(&pk, &h);
+    let start = Instant::now();
+    let sig = Signature::new(&sk, &gens, q, timestamp, &acc1);
+    let token = Token::new(&gens, timestamp, &acc1, &wit, sig);
+    println!("create token: {:?}", start.elapsed());
+
+    let start = Instant::now();
     assert!(token.verify(q, members[0]));
-    println!("done");
+    println!("verify token: {:?}", start.elapsed());
 }
 
 #[test]
