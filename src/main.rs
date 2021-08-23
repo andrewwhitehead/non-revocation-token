@@ -73,6 +73,51 @@ pub fn prover_combine_witness(
     wit.to_affine()
 }
 
+pub fn prover_combine_witness_accum(
+    members: &[Scalar],
+    witness: &[G1Affine],
+    indices: &[usize],
+    member_index: usize,
+) -> (G1Affine, G1Affine) {
+    if indices.len() < 2 {
+        panic!("Invalid usage");
+    }
+    let mut scalars = vec![Scalar::one(); indices.len()];
+    let mut factors = Vec::with_capacity(indices.len());
+    for (pos_i, idx) in indices.iter().copied().enumerate() {
+        for (pos_j, jdx) in indices.iter().copied().enumerate() {
+            if pos_i < pos_j {
+                let s = members[jdx] - members[idx];
+                scalars[pos_i] *= s;
+                scalars[pos_j] *= -s;
+            }
+        }
+        factors.push(witness[idx]);
+    }
+    for s in scalars.iter_mut() {
+        *s = s.invert().unwrap();
+    }
+    // TODO: sum-of-products
+    let mut wit = G1Projective::identity();
+    for (s, f) in scalars.iter().zip(factors.iter()) {
+        wit += f * s;
+    }
+    for (pos, idx) in indices.iter().copied().enumerate() {
+        if idx == member_index {
+            factors[pos] = (wit - factors[pos] * scalars[pos]).to_affine();
+            scalars[pos] = -members[idx];
+        } else {
+            scalars[pos] *= members[idx];
+        }
+    }
+    // TODO: sum-of-products
+    let mut accum = G1Projective::identity();
+    for (s, f) in scalars.iter().zip(factors.iter()) {
+        accum += f * s;
+    }
+    (wit.to_affine(), -accum.to_affine())
+}
+
 fn hash_to_g1(input: &[u8]) -> G1Projective {
     const DST: &[u8] = b"bbs-registry;v=1";
     <G1Projective as HashToCurve<ExpandMsgXmd<Blake2b>>>::hash_to_curve(input, DST)
@@ -413,8 +458,10 @@ fn main() {
     let mut removed = Vec::new();
     removed.extend(rem_from..size); // members that were removed
     removed.push(0); // creating witness for member 0
-    let wit = prover_combine_witness(&members, &witness, &removed[..]);
+    let (wit, check_accum) = prover_combine_witness_accum(&members, &witness, &removed[..], 0);
     println!("combine witness: {:?}", start.elapsed());
+    // check the derived accumulator matches
+    assert_eq!(check_accum, acc1);
     // members[0] is in the accum but not the witness:
     // specifically, accum = witness * (members[0] + rk)
     assert!(check_witness(members[0], &wit, &acc1, &h));
