@@ -165,15 +165,19 @@ impl Signature {
         timestamp: u64,
         accum: &G1Affine,
     ) -> Self {
-        // TODO - make deterministic
-        let e = Scalar::random(OsRng);
-        let b = Self::calc_b(gens, q, timestamp, accum);
+        let t = Scalar::from(timestamp);
+        let mut e_hash = HashScalar::new();
+        e_hash.update(&q.to_bytes());
+        e_hash.update(&t.to_bytes());
+        let e = e_hash.finalize();
+        let b = Self::calc_b(gens, q, t, accum);
         let a = (b * (sk + e).invert().unwrap()).to_affine();
         Self { a, e }
     }
 
     pub fn verify(&self, gens: &Generators, q: Scalar, timestamp: u64, accum: &G1Affine) -> bool {
-        let b = Self::calc_b(gens, q, timestamp, accum);
+        let t = Scalar::from(timestamp);
+        let b = Self::calc_b(gens, q, t, accum);
         pairing(
             &self.a,
             &(G2Projective::generator() * self.e + gens.pk).to_affine(),
@@ -184,11 +188,11 @@ impl Signature {
     pub(crate) fn calc_b(
         gens: &Generators,
         q: Scalar,
-        timestamp: u64,
+        timestamp: Scalar,
         accum: &G1Affine,
     ) -> G1Projective {
         // TODO - sum-of-products
-        gens.h0 * q + gens.h1 * Scalar::from(timestamp) + accum
+        gens.h0 * q + gens.h1 * timestamp + accum
     }
 }
 
@@ -242,7 +246,8 @@ impl Token {
         let gens = self.generators();
         let r1 = Scalar::random(OsRng); // could ensure not zero
         let r2 = r1.invert().unwrap();
-        let b = Signature::calc_b(&gens, q, self.timestamp, &self.accum);
+        let t = Scalar::from(self.timestamp);
+        let b = Signature::calc_b(&gens, q, t, &self.accum);
 
         // revealed
         let a_prime = self.sig.a * r1;
