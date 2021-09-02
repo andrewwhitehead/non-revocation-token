@@ -10,3 +10,4 @@ bls12_381 = { version = "0.5", features = ["experimental"] }
 ff = "0.10"
 group = "0.10"
 rand = "0.8"
+subtle = "2.4"
