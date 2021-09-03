@@ -494,9 +494,10 @@ impl MembershipProof {
             ..
         } = self.c_vals;
         let zero = a_prime.is_identity() | w_prime.is_identity();
-        let pair_a = pairing(&a_prime, pk).ct_eq(&pairing(&a_bar, &G2Affine::generator()));
-        let pair_w = pairing(&w_prime, h).ct_eq(&pairing(&w_bar, &G2Affine::generator()));
-        (!zero & pair_a & pair_w).into()
+        let aw_bar = (G1Projective::from(a_bar) + w_bar).to_affine();
+        let pair = (pairing(&a_prime, pk) + pairing(&w_prime, h))
+            .ct_eq(&pairing(&aw_bar, &G2Affine::generator()));
+        (!zero & pair).into()
     }
 }
 
