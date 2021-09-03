@@ -38,10 +38,7 @@ pub fn isser_update_accum(
     let mut members = members.into_iter();
     match members.next() {
         Some(m) => {
-            let mut acc = m + secret;
-            for m in members {
-                acc *= m + secret;
-            }
+            let mut acc = members.fold(m + secret, |acc, m| acc * (m + secret));
             if !add {
                 acc = acc.invert().unwrap();
             }
@@ -161,10 +158,12 @@ pub fn prover_combine_witness<A: MemberDataAccess>(member_data: &A, indices: &[u
         factors.push(member_data.get_witness(idx));
     }
     // TODO: sum-of-products
-    let mut wit = G1Projective::identity();
-    for (s, f) in scalars.into_iter().zip(factors) {
-        wit += f * s.invert().unwrap();
-    }
+    let wit = scalars
+        .into_iter()
+        .zip(factors)
+        .fold(G1Projective::identity(), |wit, (s, f)| {
+            wit + f * s.invert().unwrap()
+        });
     wit.to_affine()
 }
 
@@ -188,14 +187,14 @@ pub fn prover_combine_witness_accum<A: MemberDataAccess>(
         }
         factors.push(member_data.get_witness(idx));
     }
-    for s in scalars.iter_mut() {
+    scalars.iter_mut().for_each(|s| {
         *s = s.invert().unwrap();
-    }
+    });
     // TODO: sum-of-products
-    let mut wit = G1Projective::identity();
-    for (s, f) in scalars.iter().zip(factors.iter()) {
-        wit += f * s;
-    }
+    let wit = scalars
+        .iter()
+        .zip(factors.iter())
+        .fold(G1Projective::identity(), |wit, (s, f)| wit + f * s);
     for (pos, idx) in indices.iter().copied().enumerate() {
         if idx == member_index {
             factors[pos] = (wit - factors[pos] * scalars[pos]).to_affine();
@@ -205,10 +204,10 @@ pub fn prover_combine_witness_accum<A: MemberDataAccess>(
         }
     }
     // TODO: sum-of-products
-    let mut accum = G1Projective::identity();
-    for (s, f) in scalars.iter().zip(factors.iter()) {
-        accum += f * s;
-    }
+    let accum = scalars
+        .into_iter()
+        .zip(factors)
+        .fold(G1Projective::identity(), |acc, (s, f)| acc + f * s);
     let mut ret = [G1Affine::identity(); 2];
     G1Projective::batch_normalize(&[wit, -accum], &mut ret);
     (ret[0], ret[1])
@@ -495,6 +494,9 @@ impl MembershipProof {
         } = self.c_vals;
         let zero = a_prime.is_identity() | w_prime.is_identity();
         let aw_bar = (G1Projective::from(a_bar) + w_bar).to_affine();
+        // optimized pairing:
+        // e(A', P_2k) = e(A_bar, P_2) /\ e(W', P_2z) = e(W_bar, P_2)
+        // -> e(A', P_2k) + e(W', P_2z) = e(A_bar + W_bar, P_2)
         let pair = (pairing(&a_prime, pk) + pairing(&w_prime, h))
             .ct_eq(&pairing(&aw_bar, &G2Affine::generator()));
         (!zero & pair).into()
