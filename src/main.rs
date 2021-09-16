@@ -7,7 +7,7 @@ use blake2::{
 };
 use bls12_381::{hash_to_curve::*, *};
 use ff::Field;
-use group::{Curve, Wnaf};
+use group::{Curve, Group, Wnaf};
 use rand::{thread_rng, CryptoRng, Rng};
 use subtle::ConstantTimeEq;
 
@@ -23,10 +23,11 @@ fn random_scalar(mut rng: impl CryptoRng + Rng) -> Scalar {
 }
 
 pub fn isser_create_accum(
+    empty: G1Projective,
     secret: &Scalar,
     members: impl IntoIterator<Item = Scalar>,
 ) -> G1Projective {
-    isser_update_accum(secret, G1Projective::generator(), members, true)
+    isser_update_accum(secret, empty, members, true)
 }
 
 pub fn isser_update_accum(
@@ -96,7 +97,8 @@ impl MemberData {
 
     pub fn create(size: usize, secret: &Scalar, mut rng: impl CryptoRng + Rng) -> Self {
         let members: Vec<_> = (0..size).map(|_| random_scalar(&mut rng)).collect();
-        let accum = isser_create_accum(&secret, members.iter().copied());
+        let empty = G1Projective::random(&mut rng);
+        let accum = isser_create_accum(empty, &secret, members.iter().copied());
         let public_key = (G2Projective::generator() * secret).to_affine();
 
         let mut wnaf = Wnaf::new();
