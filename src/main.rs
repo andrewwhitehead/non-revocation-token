@@ -287,7 +287,7 @@ impl Signature {
         accum: &G1Affine,
     ) -> G1Projective {
         // TODO: sum-of-products
-        gens.h0 * q + gens.h1 * timestamp + accum
+        G1Projective::generator() + gens.h0 * q + gens.h1 * timestamp + accum
     }
 }
 
@@ -478,7 +478,7 @@ impl MembershipProof {
         } = self.c_vals;
         let c1 = a_prime * self.e_hat + w_prime * self.m_hat + (G1Projective::from(a_bar) - d) * c;
         let c2 = (G1Projective::from(d) - w_bar) * self.r2_hat - gens.h0 * self.q_hat
-            + (gens.h1 * Scalar::from(timestamp) * c);
+            + (G1Projective::generator() + gens.h1 * Scalar::from(timestamp)) * c;
         let mut c = [G1Affine::identity(); 2];
         G1Projective::batch_normalize(&[c1, c2], &mut c);
         self.c_vals.hash(&c[0], &c[1])
