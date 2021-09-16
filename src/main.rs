@@ -22,15 +22,7 @@ fn random_scalar(mut rng: impl CryptoRng + Rng) -> Scalar {
     }
 }
 
-pub fn isser_create_accum(
-    empty: G1Projective,
-    secret: &Scalar,
-    members: impl IntoIterator<Item = Scalar>,
-) -> G1Projective {
-    isser_update_accum(secret, empty, members, true)
-}
-
-pub fn isser_update_accum(
+pub fn issuer_update_accum(
     secret: &Scalar,
     base: impl Into<G1Projective>,
     members: impl IntoIterator<Item = Scalar>,
@@ -75,31 +67,30 @@ pub trait MemberDataAccess {
 
 pub struct MemberData {
     accum: G1Affine,
+    public_key: G2Affine,
     members: Vec<Scalar>,
     witness: Vec<G1Affine>,
-    public_key: G2Affine,
 }
 
 impl MemberData {
     pub fn new(
         accum: G1Affine,
+        public_key: G2Affine,
         members: Vec<Scalar>,
         witness: Vec<G1Affine>,
-        public_key: G2Affine,
     ) -> Self {
         Self {
             accum,
+            public_key,
             members,
             witness,
-            public_key,
         }
     }
 
     pub fn create(size: usize, secret: &Scalar, mut rng: impl CryptoRng + Rng) -> Self {
-        let members: Vec<_> = (0..size).map(|_| random_scalar(&mut rng)).collect();
-        let empty = G1Projective::random(&mut rng);
-        let accum = isser_create_accum(empty, &secret, members.iter().copied());
+        let accum = G1Projective::random(&mut rng);
         let public_key = (G2Projective::generator() * secret).to_affine();
+        let members: Vec<_> = (0..size).map(|_| random_scalar(&mut rng)).collect();
 
         let mut wnaf = Wnaf::new();
         let mut acc_wnaf = wnaf.base(accum, 4);
@@ -112,9 +103,9 @@ impl MemberData {
 
         Self {
             accum: accum.to_affine(),
+            public_key,
             members,
             witness,
-            public_key,
         }
     }
 }
@@ -563,7 +554,7 @@ fn main() {
 
     let start = Instant::now();
     let rem_from = size / 2;
-    let acc1 = isser_update_accum(
+    let acc1 = issuer_update_accum(
         &secret,
         member_data.get_accum(),
         (rem_from..size).map(|idx| member_data.get_member(idx)),
