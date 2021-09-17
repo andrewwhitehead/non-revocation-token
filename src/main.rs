@@ -250,21 +250,16 @@ impl Signature {
         sk: &Scalar,
         gens: &Generators,
         q: Scalar,
-        timestamp: u64,
+        t: Scalar,
+        e: Scalar,
         accum: &G1Affine,
     ) -> Self {
-        let t = Scalar::from(timestamp);
-        let mut e_hash = HashScalar::new();
-        e_hash.update(&q.to_bytes());
-        e_hash.update(&t.to_bytes());
-        let e = e_hash.finalize();
         let b = Self::calc_b(gens, q, t, accum);
         let a = (b * (sk + e).invert().unwrap()).to_affine();
         Self { a, e }
     }
 
-    pub fn verify(&self, gens: &Generators, q: Scalar, timestamp: u64, accum: &G1Affine) -> bool {
-        let t = Scalar::from(timestamp);
+    pub fn verify(&self, gens: &Generators, q: Scalar, t: Scalar, accum: &G1Affine) -> bool {
         let b = Self::calc_b(gens, q, t, accum);
         pairing(
             &self.a,
@@ -281,6 +276,19 @@ impl Signature {
     ) -> G1Projective {
         // TODO: sum-of-products
         G1Projective::generator() + gens.h0 * q + gens.h1 * timestamp + accum
+    }
+
+    #[inline]
+    pub fn calc_e(gens: &Generators, q: Scalar, t: Scalar) -> Scalar {
+        let mut e_hash = HashScalar::new();
+        e_hash.update(&gens.pk.to_uncompressed());
+        e_hash.update(&[0]);
+        e_hash.update(&gens.h.to_uncompressed());
+        e_hash.update(&[0]);
+        e_hash.update(&q.to_bytes());
+        e_hash.update(&[0]);
+        e_hash.update(&t.to_bytes());
+        e_hash.finalize()
     }
 }
 
@@ -315,7 +323,7 @@ impl Token {
     pub fn create_q(reg_id: &str, block: u32) -> Scalar {
         let mut hash_q = HashScalar::new();
         hash_q.update(reg_id);
-        hash_q.update(b"0");
+        hash_q.update(&[0]);
         hash_q.update(block.to_be_bytes());
         hash_q.finalize()
     }
@@ -326,7 +334,8 @@ impl Token {
 
     pub fn verify(&self, q: Scalar, m: Scalar) -> bool {
         let gens = self.generators();
-        self.sig.verify(&gens, q, self.timestamp, &self.accum)
+        let t = Scalar::from(self.timestamp);
+        self.sig.verify(&gens, q, t, &self.accum)
             && check_witness(m, &self.witness, &self.accum, &self.h)
     }
 
@@ -594,9 +603,11 @@ fn main() {
     let block = 10001;
     let timestamp = 9992595252;
     let q = Token::create_q(reg_id, block);
+    let t = Scalar::from(timestamp);
     let gens = Generators::new(&issuer_pk, &accum_pk);
     let start = Instant::now();
-    let sig = Signature::new(&issuer_sk, &gens, q, timestamp, &acc1);
+    let e = Signature::calc_e(&gens, q, t);
+    let sig = Signature::new(&issuer_sk, &gens, q, t, e, &acc1);
     let token = Token::new(&gens, timestamp, &acc1, &wit, sig);
     println!("create token: {:.2?}", start.elapsed());
 
