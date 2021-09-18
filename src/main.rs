@@ -16,7 +16,7 @@ const G2_UNCOMPRESSED_SIZE: usize = 192;
 fn random_scalar(mut rng: impl CryptoRng + Rng) -> Scalar {
     loop {
         let s = Scalar::random(&mut rng);
-        if !s.is_zero() {
+        if !bool::from(s.is_zero()) {
             break s;
         }
     }
