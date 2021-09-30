@@ -5,9 +5,9 @@ authors = ["Andrew Whitehead <cywolf@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-blake2 = "0.9"
 bls12_381 = { version = "0.6", features = ["experimental"] }
 ff = "0.11"
 group = "0.11"
 rand = "0.8"
+sha3 = "0.9"
 subtle = "2.4"

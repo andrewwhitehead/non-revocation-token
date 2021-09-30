@@ -1,14 +1,13 @@
 use std::time::Instant;
 
-use blake2::{
-    crypto_mac::generic_array::{typenum::Unsigned, GenericArray},
-    digest::{Update, VariableOutput},
-    Blake2b, VarBlake2b,
-};
 use bls12_381::{hash_to_curve::*, *};
 use ff::Field;
 use group::{Curve, Group, Wnaf};
 use rand::{thread_rng, CryptoRng, Rng};
+use sha3::{
+    digest::{ExtendableOutput, Update, XofReader},
+    Sha3XofReader, Shake256,
+};
 use subtle::ConstantTimeEq;
 
 const G2_UNCOMPRESSED_SIZE: usize = 192;
@@ -208,7 +207,7 @@ pub fn prover_combine_witness_accum<A: MemberDataAccess>(
 
 fn hash_to_g1(input: &[u8]) -> G1Projective {
     const DST: &[u8] = b"bbs-registry;v=1";
-    <G1Projective as HashToCurve<ExpandMsgXmd<Blake2b>>>::hash_to_curve(input, DST)
+    <G1Projective as HashToCurve<ExpandMsgXof<Shake256>>>::hash_to_curve(input, DST)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -280,7 +279,8 @@ impl Signature {
 
     #[inline]
     pub fn calc_e(gens: &Generators, q: Scalar, t: Scalar) -> Scalar {
-        let mut e_hash = HashScalar::new();
+        // TODO - use a DST?
+        let mut e_hash = HashScalar::new(None);
         e_hash.update(&gens.pk.to_uncompressed());
         e_hash.update(&[0]);
         e_hash.update(&gens.h.to_uncompressed());
@@ -288,7 +288,7 @@ impl Signature {
         e_hash.update(&q.to_bytes());
         e_hash.update(&[0]);
         e_hash.update(&t.to_bytes());
-        e_hash.finalize()
+        e_hash.finalize().next()
     }
 }
 
@@ -321,11 +321,11 @@ impl Token {
     }
 
     pub fn create_q(reg_id: &str, block: u32) -> Scalar {
-        let mut hash_q = HashScalar::new();
+        let mut hash_q = HashScalar::new(None);
         hash_q.update(reg_id);
         hash_q.update(&[0]);
         hash_q.update(block.to_be_bytes());
-        hash_q.finalize()
+        hash_q.finalize().next()
     }
 
     pub fn generators(&self) -> Generators {
@@ -401,7 +401,7 @@ struct ChallengeValues {
 impl ChallengeValues {
     // TODO challenge would never be used on its own, only write the bytes somewhere
     pub fn hash(&self, c1: &G1Affine, c2: &G1Affine) -> Scalar {
-        let mut hash_c = HashScalar::new();
+        let mut hash_c = HashScalar::new(None);
         hash_c.update(&self.a_prime.to_uncompressed());
         hash_c.update(&self.a_bar.to_uncompressed());
         hash_c.update(&self.w_prime.to_uncompressed());
@@ -409,7 +409,7 @@ impl ChallengeValues {
         hash_c.update(&self.d.to_uncompressed());
         hash_c.update(&c1.to_uncompressed());
         hash_c.update(&c2.to_uncompressed());
-        hash_c.finalize()
+        hash_c.finalize().next()
     }
 }
 
@@ -505,36 +505,69 @@ impl MembershipProof {
     }
 }
 
-#[derive(Debug)]
-pub struct HashScalar {
-    hasher: VarBlake2b,
+#[derive(Clone, Debug)]
+/// Derive Scalar values by hashing an arbitrary length input using Shake256
+pub struct HashScalar<'d> {
+    hasher: Shake256,
+    dst: Option<&'d [u8]>,
 }
 
-impl HashScalar {
-    pub fn new() -> Self {
+impl<'d> HashScalar<'d> {
+    /// Create a new HashScalar instance
+    pub fn new(dst: Option<&'d [u8]>) -> Self {
         Self {
-            hasher: VarBlake2b::new(<Scalar as HashToField>::InputLength::USIZE)
-                .expect("Invalid hasher output size"),
+            hasher: Shake256::default(),
+            dst,
         }
     }
 
+    /// Create a new HashScalar instance with initial input to the hasher
+    pub fn new_with_input(input: &[u8], dst: Option<&'d [u8]>) -> Self {
+        let mut slf = Self::new(dst);
+        slf.update(input);
+        slf
+    }
+}
+
+impl HashScalar<'_> {
     #[inline]
-    pub fn digest(input: impl AsRef<[u8]>) -> Scalar {
-        let mut state = Self::new();
+    /// Utility method to hash the input and return a single Scalar
+    pub fn digest(input: impl AsRef<[u8]>, dst: Option<&[u8]>) -> Scalar {
+        let mut state = HashScalar::new(dst);
         state.update(input.as_ref());
-        state.finalize()
+        state.finalize().next()
     }
 
+    #[inline]
+    /// Add more input to the hash state
     pub fn update(&mut self, input: impl AsRef<[u8]>) {
         self.hasher.update(input.as_ref());
     }
 
-    pub fn finalize(self) -> Scalar {
-        let mut buf = GenericArray::default();
-        self.hasher.finalize_variable(|hash| {
-            buf.copy_from_slice(hash);
-        });
-        Scalar::from_okm(&buf)
+    /// Finalize the hasher and return a factory for Scalar values
+    pub fn finalize(mut self) -> HashScalarRead {
+        if let Some(dst) = self.dst {
+            self.hasher.update(dst);
+        }
+        HashScalarRead(self.hasher.finalize_xof())
+    }
+}
+
+/// The output of a HashScalar, allowing for multiple Scalar values to be read
+pub struct HashScalarRead(Sha3XofReader);
+
+impl HashScalarRead {
+    /// Read the next non-zero Scalar value from the extensible hash output
+    pub fn next(&mut self) -> Scalar {
+        let mut buf = [0u8; 64];
+        let mut s;
+        loop {
+            self.0.read(&mut buf);
+            s = Scalar::from_bytes_wide(&buf);
+            if !bool::from(s.ct_eq(&Scalar::zero())) {
+                break s;
+            }
+        }
     }
 }
 
@@ -544,7 +577,7 @@ fn main() {
     let secret = random_scalar(rng.clone());
     let start = Instant::now();
     let member_data = MemberData::create(size, &secret, rng.clone());
-    println!("create member data: {:.2?}", start.elapsed());
+    println!("issuer perform setup: {:.2?}", start.elapsed());
 
     let start = Instant::now();
     let max_check = member_data.len().min(10);
@@ -557,7 +590,7 @@ fn main() {
         ));
     }
     println!(
-        "verify witnesses: {:.2?} each",
+        "issuer verify a member witness: {:.2?}",
         start.elapsed() / max_check as u32
     );
 
@@ -570,14 +603,20 @@ fn main() {
         false,
     )
     .to_affine();
-    println!("update accum: {:.2?}", start.elapsed());
+    println!(
+        "issuer derive block accumulator (half of members): {:.2?}",
+        start.elapsed()
+    );
 
     let start = Instant::now();
     let mut removed = Vec::new();
     removed.extend(rem_from..size); // members that were removed
     removed.push(0); // creating witness for member 0
     let (wit, check_accum) = prover_combine_witness_accum(&member_data, &removed[..], 0);
-    println!("derive witness and accum: {:.2?}", start.elapsed());
+    println!(
+        "prover derive block accumulator and witness: {:.2?}",
+        start.elapsed()
+    );
 
     // check the derived accumulator matches
     assert_eq!(check_accum, acc1);
@@ -609,7 +648,7 @@ fn main() {
     let e = Signature::calc_e(&gens, q, t);
     let sig = Signature::new(&issuer_sk, &gens, q, t, e, &acc1);
     let token = Token::new(&gens, timestamp, &acc1, &wit, sig);
-    println!("create token: {:.2?}", start.elapsed());
+    println!("issuer sign token: {:.2?}", start.elapsed());
 
     let start = Instant::now();
     assert!(token.verify(q, member_data.get_member(0)));
@@ -617,12 +656,12 @@ fn main() {
 
     let start = Instant::now();
     let prepared = token.prepare_proof(&gens, q, member_data.get_member(0), rng.clone());
-    println!("prepare proof: {:.2?}", start.elapsed());
+    println!("prepare token proof of knowledge: {:.2?}", start.elapsed());
     let c = prepared.create_challenge();
     let proof = prepared.complete(c);
     let start = Instant::now();
     let c2 = proof.create_challenge(&gens, c, timestamp);
     assert!(c == c2);
     assert!(proof.verify(&issuer_pk, &accum_pk));
-    println!("verify proof: {:.2?}", start.elapsed());
+    println!("verify token proof of knowledge: {:.2?}", start.elapsed());
 }
