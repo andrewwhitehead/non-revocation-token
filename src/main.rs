@@ -21,39 +21,47 @@ fn random_scalar(mut rng: impl CryptoRng + Rng) -> Scalar {
     }
 }
 
-pub fn issuer_update_accum(
-    secret: &Scalar,
-    base: impl Into<G1Projective>,
-    members: impl IntoIterator<Item = Scalar>,
-    add: bool,
-) -> G1Projective {
-    let mut members = members.into_iter();
-    match members.next() {
-        Some(m) => {
-            let mut acc = members.fold(m + secret, |acc, m| acc * (m + secret));
-            if !add {
-                acc = acc.invert().unwrap();
-            }
-            base.into() * acc
-        }
-        None => base.into(),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Accumulator(G1Affine);
+
+impl From<G1Affine> for Accumulator {
+    #[inline]
+    fn from(g: G1Affine) -> Self {
+        Self(g)
     }
 }
 
-pub fn check_witness(
-    member: Scalar,
-    witness: &G1Affine,
-    accum: &G1Affine,
-    public_key: &G2Affine,
-) -> bool {
-    pairing(
-        witness,
-        &(G2Projective::generator() * member + public_key).to_affine(),
-    ) == pairing(accum, &G2Affine::generator())
+impl Accumulator {
+    pub fn update(
+        &self,
+        members: impl IntoIterator<Item = Scalar>,
+        secret: &Scalar,
+        add: bool,
+    ) -> Self {
+        let mut members = members.into_iter();
+        let acc = match members.next() {
+            Some(m) => {
+                let mut acc = members.fold(m + secret, |acc, m| acc * (m + secret));
+                if !add {
+                    acc = acc.invert().unwrap();
+                }
+                (self.0 * acc).to_affine()
+            }
+            None => self.0,
+        };
+        Self(acc)
+    }
+
+    pub fn check_witness(&self, member: Scalar, witness: &G1Affine, public_key: &G2Affine) -> bool {
+        pairing(
+            witness,
+            &(G2Projective::generator() * member + public_key).to_affine(),
+        ) == pairing(&self.0, &G2Affine::generator())
+    }
 }
 
 pub trait MemberDataAccess {
-    fn get_accum(&self) -> G1Affine;
+    fn get_accum(&self) -> Accumulator;
 
     fn get_public_key(&self) -> G2Affine;
 
@@ -65,7 +73,7 @@ pub trait MemberDataAccess {
 }
 
 pub struct MemberData {
-    accum: G1Affine,
+    accum: Accumulator,
     public_key: G2Affine,
     members: Vec<Scalar>,
     witness: Vec<G1Affine>,
@@ -73,7 +81,7 @@ pub struct MemberData {
 
 impl MemberData {
     pub fn new(
-        accum: G1Affine,
+        accum: Accumulator,
         public_key: G2Affine,
         members: Vec<Scalar>,
         witness: Vec<G1Affine>,
@@ -101,7 +109,7 @@ impl MemberData {
         G1Projective::batch_normalize(&witness_proj, &mut witness);
 
         Self {
-            accum: accum.to_affine(),
+            accum: accum.to_affine().into(),
             public_key,
             members,
             witness,
@@ -110,7 +118,7 @@ impl MemberData {
 }
 
 impl MemberDataAccess for MemberData {
-    fn get_accum(&self) -> G1Affine {
+    fn get_accum(&self) -> Accumulator {
         self.accum
     }
 
@@ -131,7 +139,7 @@ impl MemberDataAccess for MemberData {
     }
 }
 
-pub fn prover_combine_witness<A: MemberDataAccess>(member_data: &A, indices: &[usize]) -> G1Affine {
+pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usize]) -> G1Affine {
     if indices.is_empty() {
         panic!("No members for witness");
     } else if indices.len() == 1 {
@@ -159,11 +167,11 @@ pub fn prover_combine_witness<A: MemberDataAccess>(member_data: &A, indices: &[u
     wit.to_affine()
 }
 
-pub fn prover_combine_witness_accum<A: MemberDataAccess>(
+pub fn prover_calc_witness_accum<A: MemberDataAccess>(
     member_data: &A,
     indices: &[usize],
     member_index: usize,
-) -> (G1Affine, G1Affine) {
+) -> (G1Affine, Accumulator) {
     if indices.len() < 2 {
         panic!("Invalid usage");
     }
@@ -202,7 +210,7 @@ pub fn prover_combine_witness_accum<A: MemberDataAccess>(
         .fold(G1Projective::identity(), |acc, (s, f)| acc + f * s);
     let mut ret = [G1Affine::identity(); 2];
     G1Projective::batch_normalize(&[wit, -accum], &mut ret);
-    (ret[0], ret[1])
+    (ret[0], ret[1].into())
 }
 
 fn hash_to_g1(input: &[u8]) -> G1Projective {
@@ -251,14 +259,14 @@ impl Signature {
         q: Scalar,
         t: Scalar,
         e: Scalar,
-        accum: &G1Affine,
+        accum: &Accumulator,
     ) -> Self {
         let b = Self::calc_b(gens, q, t, accum);
         let a = (b * (sk + e).invert().unwrap()).to_affine();
         Self { a, e }
     }
 
-    pub fn verify(&self, gens: &Generators, q: Scalar, t: Scalar, accum: &G1Affine) -> bool {
+    pub fn verify(&self, gens: &Generators, q: Scalar, t: Scalar, accum: &Accumulator) -> bool {
         let b = Self::calc_b(gens, q, t, accum);
         pairing(
             &self.a,
@@ -271,10 +279,10 @@ impl Signature {
         gens: &Generators,
         q: Scalar,
         timestamp: Scalar,
-        accum: &G1Affine,
+        accum: &Accumulator,
     ) -> G1Projective {
         // TODO: sum-of-products
-        G1Projective::generator() + gens.h0 * q + gens.h1 * timestamp + accum
+        G1Projective::generator() + gens.h0 * q + gens.h1 * timestamp + accum.0
     }
 
     #[inline]
@@ -297,7 +305,7 @@ pub struct Token {
     pk: G2Affine,
     h: G2Affine,
     timestamp: u64,
-    accum: G1Affine,
+    accum: Accumulator,
     witness: G1Affine,
     sig: Signature,
 }
@@ -306,7 +314,7 @@ impl Token {
     pub fn new(
         gens: &Generators,
         timestamp: u64,
-        accum: &G1Affine,
+        accum: &Accumulator,
         witness: &G1Affine,
         sig: Signature,
     ) -> Self {
@@ -336,7 +344,7 @@ impl Token {
         let gens = self.generators();
         let t = Scalar::from(self.timestamp);
         self.sig.verify(&gens, q, t, &self.accum)
-            && check_witness(m, &self.witness, &self.accum, &self.h)
+            && self.accum.check_witness(m, &self.witness, &self.h)
     }
 
     pub fn prepare_proof(
@@ -358,7 +366,7 @@ impl Token {
         let b_r1 = b * r1;
         let d = b_r1 - w_prime_m;
         let a_bar = b_r1 - (a_prime * self.sig.e);
-        let w_bar = self.accum * r1 - w_prime_m;
+        let w_bar = self.accum.0 * r1 - w_prime_m;
 
         // blindings
         let e_b = random_scalar(&mut rng);
@@ -399,7 +407,8 @@ struct ChallengeValues {
 }
 
 impl ChallengeValues {
-    // TODO challenge would never be used on its own, only write the bytes somewhere
+    // TODO challenge would likely never be used on its own,
+    // only contributed to a multi-proof challenge value
     pub fn hash(&self, c1: &G1Affine, c2: &G1Affine) -> Scalar {
         let mut hash_c = HashScalar::new(None);
         hash_c.update(&self.a_prime.to_uncompressed());
@@ -428,7 +437,8 @@ pub struct PreparedProof {
 }
 
 impl PreparedProof {
-    // TODO challenge would never be used on its own, only write bytes somewhere
+    // TODO challenge would likely never be used on its own,
+    // only contributed to a multi-proof challenge value
     pub fn create_challenge(&self) -> Scalar {
         let ChallengeValues {
             a_prime,
@@ -469,7 +479,8 @@ pub struct MembershipProof {
 }
 
 impl MembershipProof {
-    // TODO challenge would never be used on its own, only write bytes somewhere
+    // TODO challenge would likely never be used on its own,
+    // only contributed to a multi-proof challenge value
     pub fn create_challenge(&self, gens: &Generators, c: Scalar, timestamp: u64) -> Scalar {
         let ChallengeValues {
             a_prime,
@@ -582,10 +593,9 @@ fn main() {
     let start = Instant::now();
     let max_check = member_data.len().min(10);
     for idx in 0..max_check {
-        assert!(check_witness(
+        assert!(member_data.get_accum().check_witness(
             member_data.get_member(idx),
             &member_data.get_witness(idx),
-            &member_data.get_accum(),
             &member_data.get_public_key()
         ));
     }
@@ -596,13 +606,11 @@ fn main() {
 
     let start = Instant::now();
     let rem_from = size / 2;
-    let acc1 = issuer_update_accum(
-        &secret,
-        member_data.get_accum(),
+    let acc1 = member_data.get_accum().update(
         (rem_from..size).map(|idx| member_data.get_member(idx)),
+        &secret,
         false,
-    )
-    .to_affine();
+    );
     println!(
         "issuer derive block accumulator (half of members): {:.2?}",
         start.elapsed()
@@ -612,7 +620,7 @@ fn main() {
     let mut removed = Vec::new();
     removed.extend(rem_from..size); // members that were removed
     removed.push(0); // creating witness for member 0
-    let (wit, check_accum) = prover_combine_witness_accum(&member_data, &removed[..], 0);
+    let (wit, check_accum) = prover_calc_witness_accum(&member_data, &removed[..], 0);
     println!(
         "prover derive block accumulator and witness: {:.2?}",
         start.elapsed()
@@ -622,19 +630,9 @@ fn main() {
     assert_eq!(check_accum, acc1);
     let accum_pk = member_data.get_public_key();
     // accum = witness * (members[0] + secret)
-    assert!(check_witness(
-        member_data.get_member(0),
-        &wit,
-        &acc1,
-        &accum_pk
-    ));
+    assert!(acc1.check_witness(member_data.get_member(0), &wit, &accum_pk));
     // accum != witness * (members[1] + secret)
-    assert!(!check_witness(
-        member_data.get_member(1),
-        &acc1,
-        &wit,
-        &accum_pk
-    ));
+    assert!(!acc1.check_witness(member_data.get_member(1), &wit, &accum_pk));
 
     let issuer_sk = random_scalar(rng.clone());
     let issuer_pk = (G2Projective::generator() * issuer_sk).to_affine();
