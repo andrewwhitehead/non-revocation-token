@@ -52,22 +52,32 @@ impl Accumulator {
         Self(acc)
     }
 
-    pub fn check_witness(&self, member: Scalar, witness: &G1Affine, public_key: &G2Affine) -> bool {
+    pub fn check_witness(&self, member: Scalar, witness: &Witness, public_key: &G2Affine) -> bool {
         pairing(
-            witness,
+            &witness.0,
             &(G2Projective::generator() * member + public_key).to_affine(),
         ) == pairing(&self.0, &G2Affine::generator())
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Witness(G1Affine);
+
+impl From<G1Affine> for Witness {
+    #[inline]
+    fn from(g: G1Affine) -> Self {
+        Self(g)
+    }
+}
+
 pub trait MemberDataAccess {
-    fn get_accum(&self) -> Accumulator;
+    fn get_accumulator(&self) -> Accumulator;
 
     fn get_public_key(&self) -> G2Affine;
 
     fn get_member(&self, index: usize) -> Scalar;
 
-    fn get_witness(&self, index: usize) -> G1Affine;
+    fn get_witness(&self, index: usize) -> Witness;
 
     fn len(&self) -> usize;
 }
@@ -118,7 +128,7 @@ impl MemberData {
 }
 
 impl MemberDataAccess for MemberData {
-    fn get_accum(&self) -> Accumulator {
+    fn get_accumulator(&self) -> Accumulator {
         self.accum
     }
 
@@ -130,8 +140,8 @@ impl MemberDataAccess for MemberData {
         self.members[index]
     }
 
-    fn get_witness(&self, index: usize) -> G1Affine {
-        self.witness[index]
+    fn get_witness(&self, index: usize) -> Witness {
+        self.witness[index].into()
     }
 
     fn len(&self) -> usize {
@@ -139,7 +149,7 @@ impl MemberDataAccess for MemberData {
     }
 }
 
-pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usize]) -> G1Affine {
+pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usize]) -> Witness {
     if indices.is_empty() {
         panic!("No members for witness");
     } else if indices.len() == 1 {
@@ -155,7 +165,7 @@ pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usiz
                 scalars[pos_j] *= -s;
             }
         }
-        factors.push(member_data.get_witness(idx));
+        factors.push(member_data.get_witness(idx).0);
     }
     // TODO: sum-of-products
     let wit = scalars
@@ -164,14 +174,14 @@ pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usiz
         .fold(G1Projective::identity(), |wit, (s, f)| {
             wit + f * s.invert().unwrap()
         });
-    wit.to_affine()
+    wit.to_affine().into()
 }
 
 pub fn prover_calc_witness_accum<A: MemberDataAccess>(
     member_data: &A,
     indices: &[usize],
     member_index: usize,
-) -> (G1Affine, Accumulator) {
+) -> (Witness, Accumulator) {
     if indices.len() < 2 {
         panic!("Invalid usage");
     }
@@ -185,7 +195,7 @@ pub fn prover_calc_witness_accum<A: MemberDataAccess>(
                 scalars[pos_j] *= -s;
             }
         }
-        factors.push(member_data.get_witness(idx));
+        factors.push(member_data.get_witness(idx).0);
     }
     scalars.iter_mut().for_each(|s| {
         *s = s.invert().unwrap();
@@ -210,7 +220,7 @@ pub fn prover_calc_witness_accum<A: MemberDataAccess>(
         .fold(G1Projective::identity(), |acc, (s, f)| acc + f * s);
     let mut ret = [G1Affine::identity(); 2];
     G1Projective::batch_normalize(&[wit, -accum], &mut ret);
-    (ret[0], ret[1].into())
+    (ret[0].into(), ret[1].into())
 }
 
 fn hash_to_g1(input: &[u8]) -> G1Projective {
@@ -306,7 +316,7 @@ pub struct Token {
     h: G2Affine,
     timestamp: u64,
     accum: Accumulator,
-    witness: G1Affine,
+    witness: Witness,
     sig: Signature,
 }
 
@@ -315,7 +325,7 @@ impl Token {
         gens: &Generators,
         timestamp: u64,
         accum: &Accumulator,
-        witness: &G1Affine,
+        witness: &Witness,
         sig: Signature,
     ) -> Self {
         Self {
@@ -361,7 +371,7 @@ impl Token {
 
         // revealed
         let a_prime = self.sig.a * r1;
-        let w_prime = self.witness * r1;
+        let w_prime = self.witness.0 * r1;
         let w_prime_m = w_prime * m;
         let b_r1 = b * r1;
         let d = b_r1 - w_prime_m;
@@ -593,7 +603,7 @@ fn main() {
     let start = Instant::now();
     let max_check = member_data.len().min(10);
     for idx in 0..max_check {
-        assert!(member_data.get_accum().check_witness(
+        assert!(member_data.get_accumulator().check_witness(
             member_data.get_member(idx),
             &member_data.get_witness(idx),
             &member_data.get_public_key()
@@ -606,7 +616,7 @@ fn main() {
 
     let start = Instant::now();
     let rem_from = size / 2;
-    let acc1 = member_data.get_accum().update(
+    let acc1 = member_data.get_accumulator().update(
         (rem_from..size).map(|idx| member_data.get_member(idx)),
         &secret,
         false,
