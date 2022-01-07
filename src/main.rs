@@ -235,14 +235,12 @@ pub struct Generators {
 
 impl Generators {
     pub fn new(pk: &G2Affine, h: &G2Affine) -> Self {
-        let mut buf = [0u8; G2_UNCOMPRESSED_SIZE * 2 + 2 + 4];
-        buf[..G2_UNCOMPRESSED_SIZE].copy_from_slice(&pk.to_uncompressed()[..]);
-        buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
-            .copy_from_slice(&pk.to_uncompressed());
-        buf[G2_UNCOMPRESSED_SIZE + 1..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
+        let mut buf = [0u8; G2_UNCOMPRESSED_SIZE + 1 + G2_UNCOMPRESSED_SIZE + 4];
+        buf[..G2_UNCOMPRESSED_SIZE].copy_from_slice(&pk.to_uncompressed());
+        buf[(G2_UNCOMPRESSED_SIZE + 1)..(G2_UNCOMPRESSED_SIZE * 2 + 1)]
             .copy_from_slice(&h.to_uncompressed());
         let h0 = hash_to_g1(&buf);
-        buf[G2_UNCOMPRESSED_SIZE * 2 + 2..].copy_from_slice(&1u32.to_be_bytes());
+        buf[(G2_UNCOMPRESSED_SIZE * 2 + 1)..].copy_from_slice(&1u32.to_be_bytes());
         let h1 = hash_to_g1(&buf);
         Self {
             pk: *pk,
