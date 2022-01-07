@@ -150,9 +150,8 @@ impl MemberDataAccess for MemberData {
 }
 
 pub fn prover_calc_witness<A: MemberDataAccess>(member_data: &A, indices: &[usize]) -> Witness {
-    if indices.is_empty() {
-        panic!("No members for witness");
-    } else if indices.len() == 1 {
+    assert!(!indices.is_empty(), "No members for witness");
+    if indices.len() == 1 {
         return member_data.get_witness(indices[0]);
     }
     let mut scalars = vec![Scalar::one(); indices.len()];
@@ -182,9 +181,7 @@ pub fn prover_calc_witness_accum<A: MemberDataAccess>(
     indices: &[usize],
     member_index: usize,
 ) -> (Witness, Accumulator) {
-    if indices.len() < 2 {
-        panic!("Invalid usage");
-    }
+    assert!(indices.len() >= 2, "Invalid usage");
     let mut scalars = vec![Scalar::one(); indices.len()];
     let mut factors = Vec::with_capacity(indices.len());
     for (pos_i, idx) in indices.iter().copied().enumerate() {
@@ -306,7 +303,7 @@ impl Signature {
         e_hash.update(&q.to_bytes());
         e_hash.update(&[0]);
         e_hash.update(&t.to_bytes());
-        e_hash.finalize().next()
+        e_hash.finalize()
     }
 }
 
@@ -343,7 +340,7 @@ impl Token {
         hash_q.update(reg_id);
         hash_q.update(&[0]);
         hash_q.update(block.to_be_bytes());
-        hash_q.finalize().next()
+        hash_q.finalize()
     }
 
     pub fn generators(&self) -> Generators {
@@ -428,7 +425,7 @@ impl ChallengeValues {
         hash_c.update(&self.d.to_uncompressed());
         hash_c.update(&c1.to_uncompressed());
         hash_c.update(&c2.to_uncompressed());
-        hash_c.finalize().next()
+        hash_c.finalize()
     }
 }
 
@@ -541,22 +538,20 @@ impl<'d> HashScalar<'d> {
             dst,
         }
     }
-
-    /// Create a new HashScalar instance with initial input to the hasher
-    pub fn new_with_input(input: &[u8], dst: Option<&'d [u8]>) -> Self {
-        let mut slf = Self::new(dst);
-        slf.update(input);
-        slf
-    }
 }
 
 impl HashScalar<'_> {
     #[inline]
+    /// Add input to the hash state and return the new state
+    pub fn chain(mut self, input: impl AsRef<[u8]>) -> Self {
+        self.update(input.as_ref());
+        self
+    }
+
+    #[inline]
     /// Utility method to hash the input and return a single Scalar
     pub fn digest(input: impl AsRef<[u8]>, dst: Option<&[u8]>) -> Scalar {
-        let mut state = HashScalar::new(dst);
-        state.update(input.as_ref());
-        state.finalize().next()
+        HashScalar::new(dst).chain(input.as_ref()).finalize()
     }
 
     #[inline]
@@ -566,11 +561,16 @@ impl HashScalar<'_> {
     }
 
     /// Finalize the hasher and return a factory for Scalar values
-    pub fn finalize(mut self) -> HashScalarRead {
+    pub fn read(mut self) -> HashScalarRead {
         if let Some(dst) = self.dst {
             self.hasher.update(dst);
         }
         HashScalarRead(self.hasher.finalize_xof())
+    }
+
+    /// Finalize the hasher and return a single Scalar
+    pub fn finalize(self) -> Scalar {
+        self.read().next()
     }
 }
 
