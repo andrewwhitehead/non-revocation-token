@@ -1,8 +1,14 @@
 [package]
-name = "bbs-accum"
+name = "non-revocation-token"
 version = "0.1.0"
 authors = ["Andrew Whitehead <cywolf@gmail.com>"]
 edition = "2018"
+
+[lib]
+name = "non_revocation_token"
+
+[[bin]]
+name = "demo"
 
 [dependencies]
 bls12_381 = { version = "0.6", features = ["experimental"] }
