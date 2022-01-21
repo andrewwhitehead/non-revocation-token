@@ -9,7 +9,7 @@ use non_revocation_token::{
 fn main() {
     // issuer setup
     let mut rng = thread_rng();
-    let (issue_sk, issue_pk) = SecretKey::keypair(&mut rng);
+    let (issue_sk, issue_pk) = SecretKey::new_keypair(&mut rng);
 
     // initialize the registry
     let size = 1024;
@@ -23,11 +23,17 @@ fn main() {
     let start = Instant::now();
     let max_check = member_data.len().min(10);
     for idx in 0..max_check {
-        assert!(member_data.accumulator().check_witness(
-            member_data.member_value(idx),
-            member_data.witness(idx),
-            member_data.public_key()
-        ));
+        assert_eq!(
+            member_data
+                .accumulator()
+                .check_witness(
+                    member_data.member_value(idx),
+                    member_data.witness(idx),
+                    member_data.public_key()
+                )
+                .unwrap_u8(),
+            1
+        );
     }
     println!(
         "(test) verify a member witness: {:.2?}",
@@ -82,7 +88,10 @@ fn main() {
     assert_eq!(token, cmp_token);
 
     let start = Instant::now();
-    assert!(token.verify(block, member_data.member_value(0)));
+    assert_eq!(
+        token.verify(block, member_data.member_value(0)).unwrap_u8(),
+        1
+    );
     println!("(test) verify a token: {:.2?}", start.elapsed());
 
     let start = Instant::now();

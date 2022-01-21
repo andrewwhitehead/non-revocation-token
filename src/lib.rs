@@ -1,3 +1,5 @@
+use core::ops::Deref;
+
 use bls12_381::{
     hash_to_curve::{ExpandMsgXof, HashToCurve},
     pairing, G1Affine, G1Projective, G2Affine, G2Projective, Scalar,
@@ -9,40 +11,64 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
     Sha3XofReader, Shake256,
 };
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq, CtOption};
 
 const G2_UNCOMPRESSED_SIZE: usize = 192;
 
-fn random_scalar(mut rng: impl CryptoRng + Rng) -> Scalar {
-    loop {
-        let s = Scalar::random(&mut rng);
-        if !bool::from(s.is_zero()) {
-            break s;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonZeroScalar(Scalar);
+
+impl NonZeroScalar {
+    pub fn new(scalar: Scalar) -> CtOption<Self> {
+        CtOption::new(Self(scalar), !scalar.is_zero())
+    }
+
+    pub fn random(mut rng: impl CryptoRng + Rng) -> Self {
+        loop {
+            let s = Scalar::random(&mut rng);
+            if !bool::from(s.is_zero()) {
+                break Self(s);
+            }
         }
+    }
+
+    pub fn invert(&self) -> NonZeroScalar {
+        Self(self.0.invert().unwrap())
+    }
+}
+
+impl Deref for NonZeroScalar {
+    type Target = Scalar;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// FIXME ensure non-zero scalar
-pub struct SecretKey(Scalar);
+pub struct SecretKey(NonZeroScalar);
 
 impl SecretKey {
     pub fn random(rng: impl CryptoRng + Rng) -> Self {
-        Self(random_scalar(rng))
+        Self(NonZeroScalar::random(rng))
     }
 
     pub fn public_key(&self) -> PublicKey {
-        PublicKey((G2Projective::generator() * self.0).to_affine())
+        PublicKey((G2Projective::generator() * self.0 .0).to_affine())
     }
 
-    pub fn keypair(rng: impl CryptoRng + Rng) -> (Self, PublicKey) {
+    pub fn new_keypair(rng: impl CryptoRng + Rng) -> (Self, PublicKey) {
         let sk = Self::random(rng);
         (sk, sk.public_key())
     }
+
+    const fn scalar(&self) -> Scalar {
+        (self.0).0
+    }
 }
 
-impl From<Scalar> for SecretKey {
-    fn from(s: Scalar) -> Self {
+impl From<NonZeroScalar> for SecretKey {
+    fn from(s: NonZeroScalar) -> Self {
         Self(s)
     }
 }
@@ -57,24 +83,26 @@ impl From<G2Affine> for PublicKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// FIXME ensure non-zero scalar
-pub struct MemberValue(Scalar);
+pub struct MemberValue(NonZeroScalar);
 
 impl MemberValue {
     pub fn random(rng: impl CryptoRng + Rng) -> Self {
-        Self(random_scalar(rng))
+        Self(NonZeroScalar::random(rng))
+    }
+
+    const fn scalar(&self) -> Scalar {
+        (self.0).0
     }
 }
 
-impl From<Scalar> for MemberValue {
-    fn from(s: Scalar) -> Self {
+impl From<NonZeroScalar> for MemberValue {
+    fn from(s: NonZeroScalar) -> Self {
         Self(s)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// FIXME ensure non-zero scalar
-pub struct BlockValue(Scalar);
+pub struct BlockValue(NonZeroScalar);
 
 impl BlockValue {
     pub fn new(reg_id: &str, block_index: u32) -> Self {
@@ -84,10 +112,14 @@ impl BlockValue {
         hash_q.update(block_index.to_be_bytes());
         Self(hash_q.finalize())
     }
+
+    const fn scalar(&self) -> Scalar {
+        (self.0).0
+    }
 }
 
-impl From<Scalar> for BlockValue {
-    fn from(s: Scalar) -> Self {
+impl From<NonZeroScalar> for BlockValue {
+    fn from(s: NonZeroScalar) -> Self {
         Self(s)
     }
 }
@@ -119,7 +151,9 @@ impl Accumulator {
         let mut members = members.into_iter();
         let acc = match members.next() {
             Some(m) => {
-                let mut acc = members.fold(m.0 + revoke_sk.0, |acc, m| acc * (m.0 + revoke_sk.0));
+                let mut acc = members.fold(m.scalar() + revoke_sk.scalar(), |acc, m| {
+                    acc * (m.scalar() + revoke_sk.scalar())
+                });
                 if !add {
                     acc = acc.invert().unwrap();
                 }
@@ -131,7 +165,7 @@ impl Accumulator {
     }
 
     pub fn issuer_create_witness(&self, revoke_sk: &SecretKey, member: MemberValue) -> Witness {
-        Witness::from(self.0 * (member.0 + revoke_sk.0).invert().unwrap())
+        Witness::from(self.0 * (member.scalar() + revoke_sk.scalar()).invert().unwrap())
     }
 
     pub fn check_witness(
@@ -139,11 +173,12 @@ impl Accumulator {
         member: MemberValue,
         witness: Witness,
         public_key: PublicKey,
-    ) -> bool {
+    ) -> Choice {
         pairing(
             &witness.0,
-            &(G2Projective::generator() * member.0 + public_key.0).to_affine(),
-        ) == pairing(&self.0, &G2Affine::generator())
+            &(G2Projective::generator() * member.scalar() + public_key.0).to_affine(),
+        )
+        .ct_eq(&pairing(&self.0, &G2Affine::generator()))
     }
 }
 
@@ -207,7 +242,7 @@ impl MemberData {
         let mut acc_wnaf = wnaf.base(accum, 4);
         let witness_proj: Vec<_> = members
             .iter()
-            .map(|m| acc_wnaf.scalar(&(m.0 + revoke_sk.0).invert().unwrap()))
+            .map(|m| acc_wnaf.scalar(&(m.scalar() + revoke_sk.scalar()).invert().unwrap()))
             .collect();
         let mut witness = vec![G1Affine::identity(); size];
         G1Projective::batch_normalize(&witness_proj, &mut witness);
@@ -243,39 +278,40 @@ impl MemberDataAccess for MemberData {
     }
 }
 
-fn prover_calc_witness<A: MemberDataAccess>(
-    member_data: &A,
-    revoked_indices: &[usize],
-    member_index: usize,
-) -> Witness {
-    if revoked_indices.is_empty() {
-        return member_data.witness(member_index);
-    }
-    let index_count = revoked_indices.len() + 1;
-    let mut scalars = vec![Scalar::one(); index_count];
-    let mut factors = Vec::with_capacity(index_count);
-    for (pos_i, idx) in revoked_indices
-        .iter()
-        .copied()
-        .chain([member_index])
-        .enumerate()
-    {
-        for (pos_j, jdx) in revoked_indices.iter().take(pos_i).copied().enumerate() {
-            let s = member_data.member_value(jdx).0 - member_data.member_value(idx).0;
-            scalars[pos_i] *= s;
-            scalars[pos_j] *= -s;
-        }
-        factors.push(member_data.witness(idx).0);
-    }
-    // TODO: sum-of-products
-    let wit = scalars
-        .into_iter()
-        .zip(factors)
-        .fold(G1Projective::identity(), |wit, (s, f)| {
-            wit + f * s.invert().unwrap()
-        });
-    wit.to_affine().into()
-}
+// Simpler version of prover_calc_witness_accum for a witness only
+// fn prover_calc_witness<A: MemberDataAccess>(
+//     member_data: &A,
+//     revoked_indices: &[usize],
+//     member_index: usize,
+// ) -> Witness {
+//     if revoked_indices.is_empty() {
+//         return member_data.witness(member_index);
+//     }
+//     let index_count = revoked_indices.len() + 1;
+//     let mut scalars = vec![Scalar::one(); index_count];
+//     let mut factors = Vec::with_capacity(index_count);
+//     for (pos_i, idx) in revoked_indices
+//         .iter()
+//         .copied()
+//         .chain([member_index])
+//         .enumerate()
+//     {
+//         for (pos_j, jdx) in revoked_indices.iter().take(pos_i).copied().enumerate() {
+//             let s = member_data.member_value(jdx).scalar() - member_data.member_value(idx).scalar();
+//             scalars[pos_i] *= s;
+//             scalars[pos_j] *= -s;
+//         }
+//         factors.push(member_data.witness(idx).0);
+//     }
+//     // TODO: sum-of-products
+//     let wit = scalars
+//         .into_iter()
+//         .zip(factors)
+//         .fold(G1Projective::identity(), |wit, (s, f)| {
+//             wit + f * s.invert().unwrap()
+//         });
+//     wit.to_affine().into()
+// }
 
 fn prover_calc_witness_accum<A: MemberDataAccess>(
     member_data: &A,
@@ -295,7 +331,7 @@ fn prover_calc_witness_accum<A: MemberDataAccess>(
         .enumerate()
     {
         for (pos_j, jdx) in revoked_indices.iter().take(pos_i).copied().enumerate() {
-            let s = member_data.member_value(jdx).0 - member_data.member_value(idx).0;
+            let s = member_data.member_value(jdx).scalar() - member_data.member_value(idx).scalar();
             scalars[pos_i] *= s;
             scalars[pos_j] *= -s;
         }
@@ -310,11 +346,11 @@ fn prover_calc_witness_accum<A: MemberDataAccess>(
         .zip(factors.iter())
         .fold(G1Projective::identity(), |wit, (s, f)| wit + f * s);
     for (pos, idx) in revoked_indices.iter().copied().enumerate() {
-        scalars[pos] *= member_data.member_value(idx).0;
+        scalars[pos] *= member_data.member_value(idx).scalar();
     }
     factors[index_count - 1] =
         (wit - factors[index_count - 1] * scalars[index_count - 1]).to_affine();
-    scalars[index_count - 1] = -member_data.member_value(member_index).0;
+    scalars[index_count - 1] = -member_data.member_value(member_index).scalar();
     // TODO: sum-of-products
     let accum = scalars
         .into_iter()
@@ -355,14 +391,14 @@ impl Generators {
         }
     }
 
-    // FIXME - add serialization
+    // TODO - add serialization
     // add accessors for public keys
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature {
     a: G1Affine,
-    e: Scalar,
+    e: NonZeroScalar,
 }
 
 impl Signature {
@@ -373,7 +409,8 @@ impl Signature {
         block: BlockValue,
         timestamp: u64,
     ) -> Self {
-        let t = Scalar::from(timestamp);
+        // TODO add Timestamp type and require as input
+        let t = NonZeroScalar(Scalar::from(timestamp));
         let e = Self::calc_e(&gens, block.0, t);
         Self::new_raw(issue_sk, gens, accum, block, t, e)
     }
@@ -383,11 +420,11 @@ impl Signature {
         gens: &Generators,
         accum: Accumulator,
         block: BlockValue,
-        t: Scalar,
-        e: Scalar,
+        t: NonZeroScalar,
+        e: NonZeroScalar,
     ) -> Self {
         let b = Self::calc_b(gens, accum, block, t);
-        let a = (b * (issue_sk.0 + e).invert().unwrap()).to_affine();
+        let a = (b * (issue_sk.scalar() + e.0).invert().unwrap()).to_affine();
         Self { a, e }
     }
 
@@ -396,13 +433,16 @@ impl Signature {
         gens: &Generators,
         accum: Accumulator,
         block: BlockValue,
-        t: Scalar,
-    ) -> bool {
+        timestamp: u64,
+    ) -> Choice {
+        // TODO add Timestamp type and require as input
+        let t = NonZeroScalar(Scalar::from(timestamp));
         let b = Self::calc_b(gens, accum, block, t);
         pairing(
             &self.a,
-            &(G2Projective::generator() * self.e + gens.issue_pk).to_affine(),
-        ) == pairing(&b.to_affine(), &G2Affine::generator())
+            &(G2Projective::generator() * self.e.0 + gens.issue_pk).to_affine(),
+        )
+        .ct_eq(&pairing(&b.to_affine(), &G2Affine::generator()))
     }
 
     #[inline]
@@ -410,14 +450,14 @@ impl Signature {
         gens: &Generators,
         accum: Accumulator,
         block: BlockValue,
-        t: Scalar,
+        t: NonZeroScalar,
     ) -> G1Projective {
         // TODO: sum-of-products
-        G1Projective::generator() + gens.h0 * block.0 + gens.h1 * t + accum.0
+        G1Projective::generator() + gens.h0 * block.scalar() + gens.h1 * t.0 + accum.0
     }
 
     #[inline]
-    pub fn calc_e(gens: &Generators, q: Scalar, t: Scalar) -> Scalar {
+    pub fn calc_e(gens: &Generators, q: NonZeroScalar, t: NonZeroScalar) -> NonZeroScalar {
         // TODO - use a DST?
         let mut e_hash = HashScalar::new(None);
         e_hash.update(&gens.issue_pk.to_uncompressed());
@@ -430,7 +470,7 @@ impl Signature {
         e_hash.finalize()
     }
 
-    // FIXME - add serialization
+    // TODO - add serialization
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,11 +525,11 @@ impl Token {
         }
     }
 
-    pub fn verify(&self, block: BlockValue, member: MemberValue) -> bool {
+    pub fn verify(&self, block: BlockValue, member: MemberValue) -> Choice {
         let gens = self.generators();
-        let t = Scalar::from(self.timestamp);
-        self.signature.verify(&gens, self.accum, block, t)
-            && self
+        self.signature
+            .verify(&gens, self.accum, block, self.timestamp)
+            & self
                 .accum
                 .check_witness(member, self.witness, self.revoke_pk)
     }
@@ -501,25 +541,26 @@ impl Token {
         member: MemberValue,
         mut rng: impl CryptoRng + Rng,
     ) -> PreparedProof {
-        let r1 = random_scalar(&mut rng);
-        let r2 = r1.invert().unwrap();
-        let t = Scalar::from(self.timestamp);
+        let r1 = NonZeroScalar::random(&mut rng);
+        let r2 = r1.invert();
+        // TODO add Timestamp type
+        let t = NonZeroScalar(Scalar::from(self.timestamp));
         let b = Signature::calc_b(&gens, self.accum, block, t);
 
         // revealed
-        let a_prime = self.signature.a * r1;
-        let w_prime = self.witness.0 * r1;
-        let w_prime_m = w_prime * member.0;
-        let b_r1 = b * r1;
+        let a_prime = self.signature.a * r1.0;
+        let w_prime = self.witness.0 * r1.0;
+        let w_prime_m = w_prime * member.scalar();
+        let b_r1 = b * r1.0;
         let d = b_r1 - w_prime_m;
-        let a_bar = b_r1 - (a_prime * self.signature.e);
-        let w_bar = self.accum.0 * r1 - w_prime_m;
+        let a_bar = b_r1 - (a_prime * self.signature.e.0);
+        let w_bar = self.accum.0 * r1.0 - w_prime_m;
 
         // blindings
-        let e_b = random_scalar(&mut rng);
-        let q_b = random_scalar(&mut rng);
-        let m_b = random_scalar(&mut rng);
-        let r2_b = random_scalar(&mut rng);
+        let e_b = NonZeroScalar::random(&mut rng);
+        let q_b = NonZeroScalar::random(&mut rng);
+        let m_b = NonZeroScalar::random(&mut rng);
+        let r2_b = NonZeroScalar::random(&mut rng);
 
         let mut c_vals = [G1Affine::identity(); 5];
         G1Projective::batch_normalize(&[a_prime, a_bar, w_prime, w_bar, d], &mut c_vals);
@@ -543,7 +584,7 @@ impl Token {
         }
     }
 
-    // FIXME - add serialization
+    // TODO - add serialization
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -558,7 +599,7 @@ struct ChallengeValues {
 impl ChallengeValues {
     // TODO challenge would likely never be used on its own,
     // only contributed to a multi-proof challenge value
-    pub fn hash(&self, c1: &G1Affine, c2: &G1Affine) -> Scalar {
+    pub fn hash(&self, c1: &G1Affine, c2: &G1Affine) -> NonZeroScalar {
         let mut hash_c = HashScalar::new(None);
         hash_c.update(&self.a_prime.to_uncompressed());
         hash_c.update(&self.a_bar.to_uncompressed());
@@ -575,20 +616,20 @@ impl ChallengeValues {
 pub struct PreparedProof {
     c_vals: ChallengeValues,
     h0: G1Projective,
-    e: Scalar,
-    q: Scalar,
-    m: Scalar,
-    r2: Scalar,
-    e_b: Scalar,
-    q_b: Scalar,
-    m_b: Scalar,
-    r2_b: Scalar,
+    e: NonZeroScalar,
+    q: NonZeroScalar,
+    m: NonZeroScalar,
+    r2: NonZeroScalar,
+    e_b: NonZeroScalar,
+    q_b: NonZeroScalar,
+    m_b: NonZeroScalar,
+    r2_b: NonZeroScalar,
 }
 
 impl PreparedProof {
     // TODO challenge would likely never be used on its own,
     // only contributed to a multi-proof challenge value
-    pub fn create_challenge(&self) -> Scalar {
+    pub fn create_challenge(&self) -> NonZeroScalar {
         let ChallengeValues {
             a_prime,
             w_prime,
@@ -596,18 +637,19 @@ impl PreparedProof {
             d,
             ..
         } = self.c_vals;
-        let c1 = a_prime * self.e_b + w_prime * self.m_b;
-        let c2 = (G1Projective::from(d) - w_bar) * self.r2_b - self.h0 * self.q_b;
+        // TODO sum-of-products
+        let c1 = a_prime * self.e_b.0 + w_prime * self.m_b.0;
+        let c2 = (G1Projective::from(d) - w_bar) * self.r2_b.0 - self.h0 * self.q_b.0;
         let mut c = [G1Affine::identity(); 2];
         G1Projective::batch_normalize(&[c1, c2], &mut c);
         self.c_vals.hash(&c[0], &c[1])
     }
 
-    pub fn complete(&self, c: Scalar) -> MembershipProof {
-        let e_hat = self.e_b + c * self.e;
-        let q_hat = self.q_b - c * self.q;
-        let m_hat = self.m_b - c * self.m;
-        let r2_hat = self.r2_b - c * self.r2;
+    pub fn complete(&self, c: NonZeroScalar) -> MembershipProof {
+        let e_hat = NonZeroScalar(self.e_b.0 + c.0 * self.e.0);
+        let q_hat = NonZeroScalar(self.q_b.0 - c.0 * self.q.0);
+        let m_hat = NonZeroScalar(self.m_b.0 - c.0 * self.m.0);
+        let r2_hat = NonZeroScalar(self.r2_b.0 - c.0 * self.r2.0);
         MembershipProof {
             c_vals: self.c_vals,
             e_hat,
@@ -621,16 +663,21 @@ impl PreparedProof {
 #[derive(Clone, Debug)]
 pub struct MembershipProof {
     c_vals: ChallengeValues,
-    e_hat: Scalar,
-    q_hat: Scalar,
-    m_hat: Scalar,
-    r2_hat: Scalar,
+    e_hat: NonZeroScalar,
+    q_hat: NonZeroScalar,
+    m_hat: NonZeroScalar,
+    r2_hat: NonZeroScalar,
 }
 
 impl MembershipProof {
     // TODO challenge would likely never be used on its own,
     // only contributed to a multi-proof challenge value
-    pub fn create_challenge(&self, gens: &Generators, c: Scalar, timestamp: u64) -> Scalar {
+    pub fn create_challenge(
+        &self,
+        gens: &Generators,
+        c: NonZeroScalar,
+        timestamp: u64,
+    ) -> NonZeroScalar {
         let ChallengeValues {
             a_prime,
             a_bar,
@@ -638,12 +685,14 @@ impl MembershipProof {
             w_bar,
             d,
         } = self.c_vals;
-        let c1 = a_prime * self.e_hat + w_prime * self.m_hat + (G1Projective::from(a_bar) - d) * c;
-        let c2 = (G1Projective::from(d) - w_bar) * self.r2_hat - gens.h0 * self.q_hat
-            + (G1Projective::generator() + gens.h1 * Scalar::from(timestamp)) * c;
-        let mut c = [G1Affine::identity(); 2];
-        G1Projective::batch_normalize(&[c1, c2], &mut c);
-        self.c_vals.hash(&c[0], &c[1])
+        // TODO sum-of-products
+        let c1 =
+            a_prime * self.e_hat.0 + w_prime * self.m_hat.0 + (G1Projective::from(a_bar) - d) * c.0;
+        let c2 = (G1Projective::from(d) - w_bar) * self.r2_hat.0 - gens.h0 * self.q_hat.0
+            + (G1Projective::generator() + gens.h1 * Scalar::from(timestamp)) * c.0;
+        let mut c_norm = [G1Affine::identity(); 2];
+        G1Projective::batch_normalize(&[c1, c2], &mut c_norm);
+        self.c_vals.hash(&c_norm[0], &c_norm[1])
     }
 
     pub fn verify(&self, issue_pk: &PublicKey, revoke_pk: &PublicKey) -> bool {
@@ -692,7 +741,7 @@ impl HashScalar<'_> {
 
     #[inline]
     /// Utility method to hash the input and return a single Scalar
-    pub fn digest(input: impl AsRef<[u8]>, dst: Option<&[u8]>) -> Scalar {
+    pub fn digest(input: impl AsRef<[u8]>, dst: Option<&[u8]>) -> NonZeroScalar {
         HashScalar::new(dst).chain(input.as_ref()).finalize()
     }
 
@@ -710,8 +759,8 @@ impl HashScalar<'_> {
         HashScalarRead(self.hasher.finalize_xof())
     }
 
-    /// Finalize the hasher and return a single Scalar
-    pub fn finalize(self) -> Scalar {
+    /// Finalize the hasher and return a single NonZeroScalar
+    pub fn finalize(self) -> NonZeroScalar {
         self.read().next()
     }
 }
@@ -721,14 +770,14 @@ pub struct HashScalarRead(Sha3XofReader);
 
 impl HashScalarRead {
     /// Read the next non-zero Scalar value from the extensible hash output
-    pub fn next(&mut self) -> Scalar {
+    pub fn next(&mut self) -> NonZeroScalar {
         let mut buf = [0u8; 64];
         let mut s;
         loop {
             self.0.read(&mut buf);
             s = Scalar::from_bytes_wide(&buf);
             if !bool::from(s.ct_eq(&Scalar::zero())) {
-                break s;
+                break NonZeroScalar(s);
             }
         }
     }
