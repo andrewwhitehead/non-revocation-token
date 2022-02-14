@@ -16,6 +16,7 @@ use subtle::{Choice, ConstantTimeEq, CtOption};
 const G2_UNCOMPRESSED_SIZE: usize = 192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct NonZeroScalar(Scalar);
 
 impl NonZeroScalar {
@@ -46,6 +47,7 @@ impl Deref for NonZeroScalar {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct SecretKey(NonZeroScalar);
 
 impl SecretKey {
@@ -74,6 +76,7 @@ impl From<NonZeroScalar> for SecretKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct PublicKey(G2Affine);
 
 impl From<G2Affine> for PublicKey {
@@ -83,6 +86,7 @@ impl From<G2Affine> for PublicKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct MemberValue(NonZeroScalar);
 
 impl MemberValue {
@@ -102,6 +106,7 @@ impl From<NonZeroScalar> for MemberValue {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct BlockValue(NonZeroScalar);
 
 impl BlockValue {
@@ -125,6 +130,7 @@ impl From<NonZeroScalar> for BlockValue {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Accumulator(G1Affine);
 
 impl From<G1Affine> for Accumulator {
@@ -183,6 +189,7 @@ impl Accumulator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Witness(G1Affine);
 
 impl From<G1Affine> for Witness {

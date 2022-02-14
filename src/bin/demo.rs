@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{iter::FromIterator, time::Instant};
 
 use rand::thread_rng;
 
@@ -74,8 +74,7 @@ fn main() {
     // extract a token from a published registry
     // does not currently include any parsing
     let start = Instant::now();
-    let mut revoked_indices = Vec::with_capacity(size);
-    revoked_indices.extend(rem_from..size); // members that were removed
+    let revoked_indices = Vec::from_iter(rem_from..size); // members that were removed
     let token = Token::extract(
         &member_data,
         &revoked_indices[..],
@@ -88,10 +87,9 @@ fn main() {
     assert_eq!(token, cmp_token);
 
     let start = Instant::now();
-    assert_eq!(
-        token.verify(block, member_data.member_value(0)).unwrap_u8(),
-        1
-    );
+    assert!(bool::from(
+        token.verify(block, member_data.member_value(member_index))
+    ));
     println!("(test) verify a token: {:.2?}", start.elapsed());
 
     let start = Instant::now();
@@ -104,7 +102,7 @@ fn main() {
     let proof = prepared.complete(c);
     let start = Instant::now();
     let c2 = proof.create_challenge(&gens, c, timestamp);
-    assert!(c == c2);
+    assert_eq!(c, c2);
     assert!(proof.verify(&issue_pk, &revoke_pk));
     println!("verify a token proof of knowledge: {:.2?}", start.elapsed());
 }
